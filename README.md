@@ -1,4 +1,4 @@
-# fiks.me: A Simple Tool for Local App Debugging
+# fiks.im: A Simple Tool for Local App Debugging
 
 Just as lvh.voronenko.net, but branding neutral ;)
 
@@ -12,7 +12,7 @@ and fqdn will be neutral enough to be used by most of the teams.
 
 Thus you will be able to use domains like app.fiks.im,  api.fiks.im , etc
 
-## What is fiks.me?
+## What is fiks.im?
 fiks.im is a domain name that stands close to "we are fixing (smth)". It is specifically designed to simplify mine local app debugging by resolving all domain addresses to the localhost IP address (127.0.0.1). 
 This means that any request made to a fiks.im subdomain will be automatically redirected to your local machine, allowing you to test and debug your application in a controlled environment.
 
@@ -22,7 +22,7 @@ that you are free to use. They will be updated regularly, to ensure that you alw
 Benefits of using fiks.im:
 1. Simplicity: With fiks.im, there is no need to modify your hosts file or set up complex DNS configurations. It provides a straightforward solution for redirecting all requests to your local development environment.
 
-2. Easy setup: Using fiks.me is as simple as including the desired subdomain in your application's URL. If you want https, there is a need to take a look on this repo and configure 
+2. Easy setup: Using fiks.im is as simple as including the desired subdomain in your application's URL. If you want https, there is a need to take a look on this repo and configure 
 traefik once. For details of traefik configuration and few useful applications, please check out https://github.com/Voronenko/traefik2-compose-template . 
 This makes fiks.im an ideal tool for myself (and hopefully other developers) who want a quick and hassle-free debugging experience.
 
