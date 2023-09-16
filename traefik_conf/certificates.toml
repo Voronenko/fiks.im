@@ -1,0 +1,13 @@
+[[tls.certificates]] #first certificate
+   certFile = "/certs/fiksim_fullchain.pem"
+   keyFile = "/certs/fiksim_privkey.pem"
+
+#[[tls.certificates]] #second
+#   certFile = "/certs/second_fullchain.pem"
+#   keyFile = "/certs/second_privkey.pem"
+
+#[[tls.certificates]] #third certificate
+#   certFile = "/certs/third_fullchain.pem"
+#   keyFile = "/certs/third_privkey.pem"
+
+

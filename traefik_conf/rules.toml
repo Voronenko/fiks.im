@@ -1,0 +1,16 @@
+# Example to expose some external service on your network
+  [http.routers]
+   # Define a connection between requests and services
+     [http.routers.nasweb]
+        rule = "Host(`192.168.1.2`)"
+        entrypoints = ["websecure"]
+        service = "nas"
+#     [http.routers.nasweb.tls]
+#        certResolver = "myhttpchallenge"
+
+
+  [http.services]
+        # Define how to reach an existing service on our infrastructure
+        [http.services.nas.loadBalancer]
+           [[http.services.nas.loadBalancer.servers]]
+             url = "http://192.168.3.3:8880"

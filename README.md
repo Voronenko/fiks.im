@@ -42,3 +42,55 @@ This feature is particularly useful when testing multi-tenant applications or di
 is redirected securely to your local environment.
 
 Should you have any questions, feel free to contact
+
+## Development meat
+
+
+### Short notes
+
+to run `docker-compose up -d`
+
+once executed, on  http://traefik.fiks.im:8880/  you can find dashboard.
+
+Take a look on example of  
+
+http://whoami.fiks.im:880 or http://whoami.fiks.im
+and
+https://whoami.fiks.im:8443 or  https://whoami.fiks.im
+
+(depending on ports you have chosen)
+
+
+Traefik serves only containers that share `traefik-public` docker network.
+
+That introduces some isolation to the application into "public" and "private" parts when needed
+
+for ideas to enable your service as https and http
+
+
+### Integrating external services 
+
+
+```yaml
+
+version: '3.4'
+services:
+  whoami2:
+    image: "containous/whoami"
+#    container_name: "simple-service2"
+    networks:
+      - traefik-public
+    labels:
+      - "traefik.enable=true"
+#      - "traefik.http.middlewares.whoami2-https.redirectscheme.scheme=https"
+      - "traefik.http.routers.whoami2-http.entrypoints=web"
+      - "traefik.http.routers.whoami2-http.rule=Host(`whoami2.fiks.im`)"
+#      - "traefik.http.routers.whoami2-http.middlewares=whoami2-https@docker"
+      - "traefik.http.routers.whoami2.entrypoints=websecure"
+      - "traefik.http.routers.whoami2.rule=Host(`whoami2.fiks.im`)"
+      - "traefik.http.routers.whoami2.tls=true"
+      - "traefik.http.routers.whoami2.tls.certresolver=default"
+networks:
+  traefik-public:
+    external: true
+```

@@ -1,0 +1,32 @@
+http:
+  # Add the router
+  routers:
+    router-puls-backend:
+      entryPoints:
+      - web
+      service: pulsbackend
+      rule:  "Host(`puls-api.lvh.voronenko.net`)"
+    router-puls-backend-secure:
+      entryPoints:
+      - websecure
+      service: pulsbackend
+      rule:  "Host(`puls-api.lvh.voronenko.net`)"
+
+  # Add the service
+  services:
+    pulsbackend:
+      loadBalancer:
+        servers:
+        - url: http://192.168.3.5:8000
+        passHostHeader: true
+#      http:
+#        middlewares:
+#          testHeader:
+#            headers:
+#              accessControlAllowMethods:
+#              - GET
+#              - OPTIONS
+#              - PUT
+#          accessControlAllowOrigin: "*"
+#          accessControlMaxAge: 100
+#          addVaryHeader: true
