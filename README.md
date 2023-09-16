@@ -26,7 +26,7 @@ Benefits of using fiks.im:
 traefik once. For details of traefik configuration and few useful applications, please check out https://github.com/Voronenko/traefik2-compose-template . 
 This makes fiks.im an ideal tool for myself (and hopefully other developers) who want a quick and hassle-free debugging experience.
 
-3. Versatility: Lv.me supports both HTTP and HTTPS, allowing you to test and debug applications that require secure connections. 
+3. Versatility: fiks.im + traefik support both HTTP and HTTPS, allowing you to test and debug applications that require secure connections. 
 This flexibility ensures that you can replicate various scenarios and thoroughly test your app's functionality.
 
 ## How to use fiks.im:
