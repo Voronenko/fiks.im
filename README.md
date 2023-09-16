@@ -52,7 +52,7 @@ to run `docker-compose up -d`
 
 once executed, on  http://traefik.fiks.im:8880/  you can find dashboard.
 
-Take a look on example of  
+Take a look on example of
 
 http://whoami.fiks.im:880 or http://whoami.fiks.im
 and
@@ -66,6 +66,12 @@ Traefik serves only containers that share `traefik-public` docker network.
 That introduces some isolation to the application into "public" and "private" parts when needed
 
 for ideas to enable your service as https and http
+
+### Update certs
+
+```sh
+make update-certs
+```
 
 
 ### Integrating external services 
