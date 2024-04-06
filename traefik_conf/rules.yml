@@ -1,32 +1,40 @@
+# Example to expose some external service on your network, yml config
 http:
   # Add the router
   routers:
-    router-puls-backend:
+    router-port8000-backend:
       entryPoints:
-      - web
-      service: pulsbackend
-      rule:  "Host(`puls-api.lvh.voronenko.net`)"
-    router-puls-backend-secure:
-      entryPoints:
-      - websecure
-      service: pulsbackend
-      rule:  "Host(`puls-api.lvh.voronenko.net`)"
+        - "web"
+        - "websecure"
+      service: backend8000
+      rule:  "Host(`proj1-api.fiks.im`, `proj2-api.fiks.im`)"
+      middlewares:
+#        - auth
+        - redirect-to-https
+      tls:
+        domains:
+          - main: proj1-api.fiks.im
+          - main: proj2-api.fiks.im
 
   # Add the service
   services:
-    pulsbackend:
+    backend8000:
       loadBalancer:
         servers:
-        - url: http://192.168.3.5:8000
+          - url: "http://192.168.3.5:8000"
         passHostHeader: true
-#      http:
-#        middlewares:
-#          testHeader:
-#            headers:
-#              accessControlAllowMethods:
-#              - GET
-#              - OPTIONS
-#              - PUT
-#          accessControlAllowOrigin: "*"
-#          accessControlMaxAge: 100
-#          addVaryHeader: true
+    httpbin:
+      loadBalancer:
+        servers:
+          - url: "https://httpbin.org/get"
+        passHostHeader: true
+
+  middlewares:
+    redirect-to-https:
+      redirectScheme:
+        scheme: "https"
+        port: "443"
+        permanent: true
+#      basicAuth:
+#        users:
+#          - "test:XXXX"

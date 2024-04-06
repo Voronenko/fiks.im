@@ -1,4 +1,4 @@
-# Example to expose some external service on your network
+# Example to expose some external service on your network, toml config
   [http.routers]
    # Define a connection between requests and services
      [http.routers.nasweb]
