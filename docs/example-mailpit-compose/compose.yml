@@ -1,0 +1,36 @@
+services:
+  mailhog:
+    image: axllent/mailpit:v1.28
+    restart: unless-stopped
+    ports:
+      - "25:1025" #SMTP
+      - "8025:8025" #WEBUI
+    networks:
+        traefik-public:
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.mailhog.rule=Host(`mail.fiks.im`)"
+      - "traefik.http.routers.mailhog.entrypoints=web"
+      - "traefik.http.services.mailhog.loadbalancer.server.port=8025"
+      - "traefik.http.routers.mailhog-secure.entrypoints=websecure"
+      - "traefik.http.routers.mailhog-secure.rule=Host(`mail.fiks.im`)"
+#      - "traefik.http.routers.ftp-secure.middlewares=traefik-auth"
+      - "traefik.http.routers.mailhog-secure.tls=true"
+  mailhog_stunnel:
+    image: dweomer/stunnel
+    restart: unless-stopped
+    networks:
+        traefik-public:
+    environment:
+      - STUNNEL_SERVICE=smtps
+      - STUNNEL_ACCEPT=465
+      - STUNNEL_CONNECT=mailhog:1025
+    volumes:
+      - ./traefik_certs/fiksim_fullchain.pem:/etc/stunnel/stunnel.pem:ro
+      - ./traefik_certs/fiksim_privkey.pem:/etc/stunnel/stunnel.key:ro
+    ports:
+      - 465:465 # smtp tls
+networks:
+  # docker network create --attachable  traefik-public
+  traefik-public:
+    external: true
