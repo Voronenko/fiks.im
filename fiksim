@@ -90,14 +90,27 @@ del() {
         exit 1
     fi
 
+    # Determine safe name and file path based on provided FQDN
     SAFE_NAME=${FQDN//./-}
     FILENAME="map-${SAFE_NAME}.yml"
-    FILEPATH="$CONF_DIR/$FILENAME"
+    FILEPATH="${CONF_DIR}/${FILENAME}"
 
     if [ -f "$FILEPATH" ]; then
         rm "$FILEPATH"
         echo -e "${YELLOW}Removed configuration snippet:${NC} $FILEPATH"
     else
+        # If not found and FQDN is a single word, try with .fiks.im suffix
+        if [[ "$FQDN" != *.* ]]; then
+            FQDN="${FQDN}.fiks.im"
+            SAFE_NAME=${FQDN//./-}
+            FILENAME="map-${SAFE_NAME}.yml"
+            FILEPATH="${CONF_DIR}/${FILENAME}"
+            if [ -f "$FILEPATH" ]; then
+                rm "$FILEPATH"
+                echo -e "${YELLOW}Removed configuration snippet (with .fiks.im suffix):${NC} $FILEPATH"
+                exit 0
+            fi
+        fi
         echo -e "${RED}Error:${NC} Configuration for '$FQDN' not found (looked for $FILEPATH)"
         exit 1
     fi
