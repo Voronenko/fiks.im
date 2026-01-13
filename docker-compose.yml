@@ -10,8 +10,6 @@ services:
       - 80:80
       - 443:443
       - 880:8080
-#      - 5432:5432
-#      - 27017:27017
     deploy:
       replicas: 1
       placement:
@@ -40,8 +38,6 @@ services:
       - "--providers.file.filename=/conf/rules.yml"
       - "--entrypoints.web.address=:80"
       - "--entrypoints.websecure.address=:443"
-#      - "--entrypoints.mongo.address=:27017"
-#      - "--entrypoints.postgres.address=:5432"
       - "--log.level=INFO"
       - "--accessLog"
       - "--api"
@@ -57,6 +53,8 @@ services:
     networks:
       - default
       - traefik-public
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     labels:
       - "traefik.enable=true"
       - "traefik.http.routers.traefik.rule=Host(`traefik.fiks.im`)"

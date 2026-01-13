@@ -104,3 +104,68 @@ networks:
   traefik-public:
     external: true
 ```
+
+
+## Local Service Mapping (fiksim CLI)
+
+`fiksim` is a CLI utility included in this repository to easily map local services (running on your host machine) to Traefik domains. It automatically handles HTTP and HTTPS routing.
+
+### Usage
+
+Ensure the script is executable:
+```bash
+chmod +x fiksim
+```
+
+#### Commands
+
+*   **List active mappings:**
+    ```bash
+    ./fiksim list
+    ```
+
+*   **Add a mapping:**
+    Maps a fiks.im domain to a local port.
+    ```bash
+    ./fiksim add <fqdn> <port>
+    ```
+    *Example:*
+    ```bash
+    ./fiksim add myapp.fiks.im 3000
+    ```
+    This will make `http://myapp.fiks.im` and `https://myapp.fiks.im` available via Traefik, proxying traffic to `http://host.docker.internal:3000`.
+
+*   **Remove a mapping:**
+    ```bash
+    ./fiksim del <fqdn>
+    ```
+    *Example:*
+    ```bash
+    ./fiksim del myapp.fiks.im
+    ```
+
+## Traefik Inspection CLI (traefik_cli.py)
+
+`traefik_cli.py` is a Python utility to inspect active Traefik routers and map them to their backend Docker containers.
+
+### Usage
+
+Ensure the script is executable:
+```bash
+chmod +x traefikctl.py
+```
+
+Run the script:
+```bash
+./traefikctl.py
+```
+
+### Output
+The script prints a table compatible with wide terminal windows:
+*   **HOST**: The domain rule.
+*   **ENDPOINT**: The Traefik router/service name.
+*   **CONTAINER NAME**: The resolved Docker container name.
+*   **CONTAINER ID**: The Docker container ID.
+*   **CPORT**: The internal service port.
+
+External services mapped via `fiksim` will show as "External/Host".

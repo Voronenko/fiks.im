@@ -1,0 +1,152 @@
+#!/bin/bash
+
+# Configuration
+# Resolve the directory where the script is located, handling symlinks
+SOURCE="${BASH_SOURCE[0]}"
+while [ -h "$SOURCE" ]; do # resolve $SOURCE until the file is no longer a symlink
+  DIR="$( cd -P "$( dirname "$SOURCE" )" >/dev/null 2>&1 && pwd )"
+  SOURCE="$(readlink "$SOURCE")"
+  [[ $SOURCE != /* ]] && SOURCE="$DIR/$SOURCE" # if $SOURCE was a relative symlink, we need to resolve it relative to the path where the symlink file was located
+done
+SCRIPT_DIR="$( cd -P "$( dirname "$SOURCE" )" >/dev/null 2>&1 && pwd )"
+CONF_DIR="${SCRIPT_DIR}/traefik_conf"
+
+# Colors
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+BLUE='\033[0;34m'
+YELLOW='\033[1;33m'
+BOLD='\033[1m'
+NC='\033[0m' # No Color
+
+usage() {
+    echo -e "${BOLD}Usage:${NC} $0 {add|del|list} [args]"
+    echo ""
+    echo -e "${BOLD}Commands:${NC}"
+    echo -e "  ${GREEN}add${NC} <fqdn> <port>     Add a new service mapping."
+    echo "                        Maps <fqdn> to http://host.docker.internal:<port>"
+    echo -e "                        Example: $0 add app.example.com 8080"
+    echo -e "  ${RED}del${NC} <fqdn>            Remove a service mapping."
+    echo -e "  ${BLUE}list${NC}                  List all active service mappings."
+}
+
+add() {
+    FQDN=$1
+    PORT=$2
+
+    if [ -z "$FQDN" ] || [ -z "$PORT" ]; then
+        usage
+        exit 1
+    fi
+
+    if [[ "$FQDN" != *.* ]]; then
+        FQDN="${FQDN}.fiks.im"
+    fi
+
+    # Sanitize FQDN for use in internal names (replace dots with dashes)
+    SAFE_NAME=${FQDN//./-}
+    FILENAME="map-${SAFE_NAME}.yml"
+    FILEPATH="$CONF_DIR/$FILENAME"
+
+    # Target URL is always host.docker.internal with the provided port
+    TARGET_URL="http://host.docker.internal:$PORT"
+
+    # Create the Traefik configuration snippet
+    cat > "$FILEPATH" <<EOF
+http:
+  routers:
+    to-${SAFE_NAME}-http:
+      rule: "Host(\`${FQDN}\`)"
+      service: "svc-${SAFE_NAME}"
+      entryPoints:
+        - "web"
+
+    to-${SAFE_NAME}-https:
+      rule: "Host(\`${FQDN}\`)"
+      service: "svc-${SAFE_NAME}"
+      entryPoints:
+        - "websecure"
+      tls:
+        certResolver: le
+
+  services:
+    svc-${SAFE_NAME}:
+      loadBalancer:
+        servers:
+          - url: "${TARGET_URL}"
+        passHostHeader: true
+EOF
+
+    echo -e "${GREEN}Successfully created configuration snippet:${NC} $FILEPATH"
+    echo -e "Mapping ${BOLD}$FQDN${NC} -> ${BOLD}$TARGET_URL${NC}"
+    echo "Traefik should detect the change and apply it automatically."
+}
+
+del() {
+    FQDN=$1
+
+    if [ -z "$FQDN" ]; then
+        usage
+        exit 1
+    fi
+
+    SAFE_NAME=${FQDN//./-}
+    FILENAME="map-${SAFE_NAME}.yml"
+    FILEPATH="$CONF_DIR/$FILENAME"
+
+    if [ -f "$FILEPATH" ]; then
+        rm "$FILEPATH"
+        echo -e "${YELLOW}Removed configuration snippet:${NC} $FILEPATH"
+    else
+        echo -e "${RED}Error:${NC} Configuration for '$FQDN' not found (looked for $FILEPATH)"
+        exit 1
+    fi
+}
+
+list() {
+    echo -e "${BOLD}Active mappings in ${BLUE}$CONF_DIR${NC}:"
+    echo ""
+    printf "${BOLD}%-30s %-30s %-10s${NC}\n" "ID" "HOST" "PORT"
+    echo "---------------------------------------------------------------------------"
+
+    # Check if any files exist to avoid error in loop
+    shopt -s nullglob
+    for file in "$CONF_DIR"/map-*.yml; do
+        filename=$(basename -- "$file")
+        id="${filename%.yml}"
+
+        # Extract Host
+        # Look for: rule: "Host(`NAME`)"
+        host=$(grep -m 1 'rule: "Host' "$file" | sed -E 's/.*Host\(`([^`]+)`\).*/\1/')
+
+        # Extract Port
+        # Look for: - url: "http://host.docker.internal:PORT"
+        port=$(grep -m 1 'url: "http://host.docker.internal' "$file" | sed -E 's/.*:([0-9]+)".*/\1/')
+
+        if [ -z "$host" ]; then host="???"; fi
+        if [ -z "$port" ]; then port="???"; fi
+
+        printf "%-30s ${GREEN}%-30s${NC} ${YELLOW}%-10s${NC}\n" "$id" "$host" "$port"
+    done
+    shopt -u nullglob
+}
+
+# Main execution
+COMMAND=$1
+shift
+
+case "$COMMAND" in
+    add)
+        add "$@"
+        ;;
+    del)
+        del "$@"
+        ;;
+    list)
+        list
+        ;;
+    *)
+        usage
+        exit 1
+        ;;
+esac
