@@ -1,0 +1,1350 @@
+#!/usr/bin/env python3
+
+# fiks-mirror - Interactive Traffic Mirror Generator
+# Generates docker-compose files for traffic mirroring using trafficmirror
+
+import json
+import urllib.request
+import subprocess
+import sys
+import re
+import os
+
+# Configuration
+TRAEFIK_API_URL = "http://localhost:880/api"
+
+# ANSI color constants for terminal output
+RED = '\033[91m'
+GREEN = '\033[92m'
+YELLOW = '\033[93m'
+RESET = '\033[0m'
+
+
+def error(msg):
+    """Write colored error message to stderr."""
+    sys.stderr.write(f"{RED}Error:{RESET} {msg}\n")
+
+
+def success(msg):
+    """Write colored success message to stdout."""
+    print(f"{GREEN}{msg}{RESET}")
+
+
+def info(msg):
+    """Write colored info message to stdout."""
+    print(f"{YELLOW}{msg}{RESET}")
+
+
+# ============================================================================
+# FOUNDATIONAL FUNCTIONS - Phase 2
+# ============================================================================
+
+def fetch_json(url):
+    """Fetch JSON data from a URL with error handling.
+
+    Args:
+        url: The URL to fetch from
+
+    Returns:
+        Parsed JSON data as dict/list, or empty list on error
+    """
+    try:
+        req = urllib.request.Request(url)
+        with urllib.request.urlopen(req) as response:
+            if response.status == 200:
+                return json.loads(response.read().decode())
+    except urllib.error.URLError as e:
+        error(f"Cannot connect to {url}: {e}")
+        sys.exit(1)
+    except Exception as e:
+        error(f"Unexpected error fetching {url}: {e}")
+        sys.exit(1)
+    return []
+
+
+def get_docker_containers():
+    """Get all running Docker containers with their metadata.
+
+    Returns:
+        Dict mapping IP addresses to container info with:
+        - name: Container name
+        - id: Short container ID (12 chars)
+        - compose_path: Path to compose project or None
+        - compose_service: Service name in compose or None
+        - networks: List of network names
+        - exposed_ports: Dict of {port: protocol} for exposed ports
+        - traefik_port_labels: Dict of {service_name: port} from Traefik labels
+    """
+    try:
+        # Get all running container IDs
+        cmd = ["docker", "ps", "-q"]
+        output = subprocess.check_output(cmd).decode().strip()
+        if not output:
+            return {}
+        ids = output.split()
+
+        # Inspect them to get IPs and Names
+        cmd_inspect = ["docker", "inspect"] + ids
+        inspect_output = subprocess.check_output(cmd_inspect).decode()
+        data = json.loads(inspect_output)
+
+        containers = {}
+        for container in data:
+            name = container.get("Name", "").lstrip("/")
+            cid = container.get("Id", "")[:12]
+
+            # Extract docker-compose labels
+            labels = container.get("Config", {}).get("Labels", {})
+            compose_project = labels.get("com.docker.compose.project.working_dir", "")
+            compose_service = labels.get("com.docker.compose.service", "")
+
+            # Replace $HOME with ~ in the compose path
+            if compose_project:
+                home = os.path.expanduser("~")
+                if compose_project.startswith(home):
+                    compose_project = "~" + compose_project[len(home):]
+
+            # Get networks
+            networks = list(container.get("NetworkSettings", {}).get("Networks", {}).keys())
+
+            # Get exposed ports (both from Config and NetworkSettings)
+            exposed_ports = {}
+            # Ports from Config.ExposedPorts (format: {"80/tcp": {}, "443/tcp": {}})
+            config_ports = container.get("Config", {}).get("ExposedPorts", {})
+            for port_proto in config_ports.keys():
+                if "/" in port_proto:
+                    port, protocol = port_proto.split("/", 1)
+                    exposed_ports[port] = protocol
+
+            # Also check actual port bindings from NetworkSettings
+            network_settings = container.get("NetworkSettings", {})
+            ports_dict = network_settings.get("Ports", {})
+            for container_port, bindings in ports_dict.items():
+                if bindings is not None:  # Port is actually mapped/bound
+                    if "/" in container_port:
+                        port, protocol = container_port.split("/", 1)
+                        exposed_ports[port] = protocol
+
+            # Extract Traefik port labels (traefik.http.services.<service>.loadbalancer.server.port)
+            traefik_port_labels = {}
+            for label_key, label_value in labels.items():
+                # Match pattern: traefik.http.services.<service>.loadbalancer.server.port
+                if label_key.startswith("traefik.http.services.") and label_key.endswith(".loadbalancer.server.port"):
+                    # Extract service name from label key
+                    # traefik.http.services.kraken-mock.loadbalancer.server.port -> kraken-mock
+                    parts = label_key.split(".")
+                    if len(parts) >= 5:
+                        service_name = parts[3]  # The service name is at index 3
+                        traefik_port_labels[service_name] = label_value
+
+            container_info = {
+                "name": name,
+                "id": cid,
+                "compose_path": compose_project if compose_project else None,
+                "compose_service": compose_service if compose_service else None,
+                "networks": networks,
+                "exposed_ports": exposed_ports,
+                "traefik_port_labels": traefik_port_labels,
+            }
+
+            # Check network settings for IP mapping
+            net_settings = container.get("NetworkSettings", {})
+            for net_name, net_conf in net_settings.get("Networks", {}).items():
+                ip = net_conf.get("IPAddress")
+                if ip:
+                    containers[ip] = container_info
+
+        return containers
+    except FileNotFoundError:
+        error("Docker command not found. Is Docker installed?")
+        sys.exit(1)
+    except subprocess.CalledProcessError as e:
+        error(f"Error running docker command: {e}")
+        sys.exit(1)
+    except Exception as e:
+        error(f"Error inspecting docker containers: {e}")
+        sys.exit(1)
+
+
+def extract_service_name(router):
+    """Extract clean service name from Traefik router Host() rule.
+
+    Args:
+        router: Router dict from Traefik API
+
+    Returns:
+        Clean service name (e.g., "whoami" from "whoami.fiks.im")
+    """
+    rule = router.get("rule", "")
+    hosts = re.findall(r"Host\(`([^`]+)`\)", rule)
+    if hosts:
+        # Extract first part of domain (service name)
+        domain = hosts[0]
+        # Remove .fiks.im suffix if present
+        if domain.endswith(".fiks.im"):
+            return domain.replace(".fiks.im", "")
+        return domain.split(".")[0]
+    return "unknown"
+
+
+def get_target_port(service):
+    """Extract port from Traefik service loadBalancer configuration.
+
+    Args:
+        service: Service dict from Traefik API
+
+    Returns:
+        Port number as string, or empty string if not found
+    """
+    try:
+        lb = service.get("loadBalancer", {})
+        servers = lb.get("servers", [])
+        if servers:
+            url = servers[0].get("url", "")
+            # Parse "http://IP:PORT" -> extract PORT
+            if "://" in url:
+                target = url.split("://")[1]
+                parts = target.split(":")
+                if len(parts) > 1:
+                    return parts[1]
+    except (IndexError, AttributeError, KeyError):
+        pass
+    return ""
+
+
+def correlate_services(routers, services, docker_containers):
+    """Correlate Traefik routers with services and Docker containers.
+
+    Args:
+        routers: List of router dicts from Traefik API
+        services: List of service dicts from Traefik API
+        docker_containers: Dict from get_docker_containers()
+
+    Returns:
+        List of ServiceSelection dicts with:
+        - service_name: Clean service name
+        - host_domain: Full domain from Host() rule
+        - target_port: Port number (from Traefik service config)
+        - container_name: Docker container name or None
+        - compose_path: Compose project path or "Unknown"
+        - networks: List of network names
+        - exposed_ports: Dict of {port: protocol} from container
+    """
+    # Map service name -> service data
+    service_map = {s.get("name"): s for s in services}
+
+    results = []
+
+    for router in routers:
+        if router.get("status") != "enabled":
+            continue
+
+        service_name = router.get("service", "")
+        rule = router.get("rule", "")
+
+        # Try appending provider suffix if needed
+        service = service_map.get(service_name)
+        if not service:
+            provider = router.get("provider")
+            if provider:
+                service = service_map.get(f"{service_name}@{provider}")
+
+        if not service:
+            continue
+
+        # Extract service name from Host rule
+        clean_name = extract_service_name(router)
+        host_domain = re.findall(r"Host\(`([^`]+)`\)", rule)
+        domain = host_domain[0] if host_domain else clean_name
+
+        # Find matching Docker container via IP
+        container_info = None
+        try:
+            lb = service.get("loadBalancer", {})
+            servers = lb.get("servers", [])
+            if servers:
+                url = servers[0].get("url", "")
+                if "://" in url:
+                    ip = url.split("://")[1].split(":")[0]
+                    container_info = docker_containers.get(ip)
+        except (IndexError, KeyError):
+            pass
+
+        # Get target port - prefer Traefik label over URL extraction
+        target_port = ""
+        if container_info:
+            # Check for explicit port label from container
+            traefik_labels = container_info.get("traefik_port_labels", {})
+            # Try to find port by router service name or clean service name
+            if service_name in traefik_labels:
+                target_port = traefik_labels[service_name]
+            elif clean_name in traefik_labels:
+                target_port = traefik_labels[clean_name]
+
+        # Fall back to URL port extraction if no label found
+        if not target_port:
+            target_port = get_target_port(service)
+
+        if container_info:
+            results.append({
+                "service_name": clean_name,
+                "host_domain": domain,
+                "target_port": target_port,
+                "container_name": container_info["name"],
+                "compose_path": container_info.get("compose_path") or "Unknown",
+                "networks": container_info.get("networks") or [],
+                "exposed_ports": container_info.get("exposed_ports") or {},
+            })
+        else:
+            results.append({
+                "service_name": clean_name,
+                "host_domain": domain,
+                "target_port": target_port,
+                "container_name": None,
+                "compose_path": "Unknown",
+                "networks": [],
+                "exposed_ports": {},
+            })
+
+    return results
+
+
+def sanitize_name(name):
+    """Sanitize a name for safe use in directory names and environment variables.
+
+    Args:
+        name: The original name
+
+    Returns:
+        Sanitized name with special characters replaced by underscores
+    """
+    # Replace special characters with underscores
+    safe = re.sub(r'[^a-zA-Z0-9_-]', '_', name)
+    # Ensure it doesn't start with a number
+    if safe and safe[0].isdigit():
+        safe = "svc_" + safe
+    return safe
+
+
+# ============================================================================
+# USER STORY 1: INTERACTIVE SERVICE DISCOVERY AND MIRROR CREATION
+# ============================================================================
+
+def select_service_interactive(services):
+    """Use fzf to interactively select a service from the list.
+
+    Args:
+        services: List of ServiceSelection dicts
+
+    Returns:
+        Selected ServiceSelection dict, or None if cancelled
+    """
+    if not services:
+        return None
+
+    # Build fzf input: service_name  compose_path
+    input_data = ""
+    for svc in services:
+        input_data += f"{svc['service_name']}\t{svc['compose_path']}\n"
+
+    try:
+        process = subprocess.Popen(
+            ['fzf', '--prompt', 'Select service: ', '--delimiter', '\t', '--with-nth', '1,2'],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True
+        )
+        stdout, stderr = process.communicate(input=input_data)
+
+        if process.returncode == 0 and stdout.strip():
+            selected_name = stdout.strip().split('\t')[0]
+            for svc in services:
+                if svc['service_name'] == selected_name:
+                    return svc
+        return None
+    except FileNotFoundError:
+        # fzf not installed - fall back to numbered list
+        info("fzf not found. Falling back to numbered list selection.")
+        return select_service_fallback(services)
+    except Exception as e:
+        error(f"Error running fzf: {e}")
+        return select_service_fallback(services)
+
+
+def select_service_fallback(services):
+    """Fallback numbered list selection when fzf is unavailable.
+
+    Args:
+        services: List of ServiceSelection dicts
+
+    Returns:
+        Selected ServiceSelection dict, or None if cancelled
+    """
+    print("\nAvailable services:")
+    for i, svc in enumerate(services, 1):
+        print(f"  {i}. {svc['service_name']} ({svc['compose_path']})")
+
+    try:
+        choice = input("\nSelect service number (or 'q' to quit): ").strip()
+        if choice.lower() == 'q':
+            return None
+
+        idx = int(choice) - 1
+        if 0 <= idx < len(services):
+            return services[idx]
+        else:
+            error("Invalid selection")
+            return None
+    except (ValueError, KeyboardInterrupt):
+        return None
+    except EOFError:
+        return None
+
+
+def select_network_interactive(networks):
+    """Use fzf to interactively select a network from the list.
+
+    Args:
+        networks: List of network names
+
+    Returns:
+        Selected network name, or None if cancelled
+    """
+    if not networks:
+        return None
+
+    # If only one network, return it directly
+    if len(networks) == 1:
+        return networks[0]
+
+    # Build fzf input
+    input_data = "\n".join(networks) + "\n"
+
+    try:
+        process = subprocess.Popen(
+            ['fzf', '--prompt', 'Select network: ', '--height', '10'],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True
+        )
+        stdout, _ = process.communicate(input=input_data)
+
+        if process.returncode == 0 and stdout.strip():
+            return stdout.strip()
+        return None
+    except FileNotFoundError:
+        # fzf not installed - fall back to numbered list
+        info("fzf not found. Falling back to numbered list selection.")
+        return select_network_fallback(networks)
+    except Exception as e:
+        error(f"Error running fzf: {e}")
+        return select_network_fallback(networks)
+
+
+def select_network_fallback(networks):
+    """Fallback numbered list selection when fzf is unavailable.
+
+    Args:
+        networks: List of network names
+
+    Returns:
+        Selected network name, or None if cancelled
+    """
+    print("\nAvailable networks:")
+    for i, net in enumerate(networks, 1):
+        print(f"  {i}. {net}")
+
+    try:
+        choice = input("\nSelect network number (or 'q' to quit): ").strip()
+        if choice.lower() == 'q':
+            return None
+
+        idx = int(choice) - 1
+        if 0 <= idx < len(networks):
+            return networks[idx]
+        else:
+            error("Invalid selection")
+            return None
+    except (ValueError, KeyboardInterrupt):
+        return None
+    except EOFError:
+        return None
+
+
+def select_port_interactive(exposed_ports, traefik_port):
+    """Select a port from exposed ports, with intelligent defaults.
+
+    Args:
+        exposed_ports: Dict of {port: protocol} from container
+        traefik_port: Port detected from Traefik service config or labels
+
+    Returns:
+        Selected port as string, or prompts user for input if no ports found
+    """
+    # If Traefik label provided a valid port, use it immediately
+    if traefik_port:
+        # If no exposed ports, just use the Traefik port without prompting
+        if not exposed_ports:
+            return traefik_port
+        # If Traefik port is in exposed ports, use that
+        if traefik_port in exposed_ports:
+            return traefik_port
+
+    # If no exposed ports and no Traefik port, prompt user directly
+    if not exposed_ports:
+        info("No exposed ports detected on container.")
+        try:
+            port = input(f"Enter target port manually [default: {traefik_port or '3000'}]: ").strip()
+            return port if port else (traefik_port or "3000")
+        except (KeyboardInterrupt, EOFError):
+            return None
+
+    # If only one port, use it directly
+    if len(exposed_ports) == 1:
+        return list(exposed_ports.keys())[0]
+
+    # Multiple ports - need user selection
+    # Prefer ports like 80, 443, 3000, 8000, 8080 as common defaults
+    preferred_ports = ['80', '443', '3000', '8000', '8080', '5000', '5001']
+    for pref in preferred_ports:
+        if pref in exposed_ports:
+            info(f"Multiple ports found. Using common port {pref} as default.")
+            return pref
+
+    # Build port list for selection
+    port_list = list(exposed_ports.items())  # [(port, protocol), ...]
+
+    try:
+        process = subprocess.Popen(
+            ['fzf', '--prompt', 'Select port: ', '--height', '10'],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True
+        )
+        input_data = "\n".join(f"{port}/{proto}" for port, proto in port_list) + "\n"
+        stdout, _ = process.communicate(input=input_data)
+
+        if process.returncode == 0 and stdout.strip():
+            # Extract port number from "port/protocol" format
+            selected = stdout.strip().split("/")[0]
+            return selected
+
+        # Fallback to numbered list
+        return select_port_fallback(port_list, traefik_port)
+    except FileNotFoundError:
+        info("fzf not found. Falling back to numbered list selection.")
+        return select_port_fallback(port_list, traefik_port)
+    except Exception as e:
+        error(f"Error running fzf: {e}")
+        return select_port_fallback(port_list, traefik_port)
+
+
+def select_port_fallback(port_list, traefik_port):
+    """Fallback numbered list selection for ports.
+
+    Args:
+        port_list: List of (port, protocol) tuples
+        traefik_port: Port from Traefik config (used as default suggestion)
+
+    Returns:
+        Selected port as string, or None if cancelled
+    """
+    print("\nAvailable exposed ports:")
+    for i, (port, proto) in enumerate(port_list, 1):
+        marker = " (Traefik detected)" if port == traefik_port else ""
+        print(f"  {i}. {port}/{proto}{marker}")
+
+    default_suggestion = traefik_port if traefik_port else "3000"
+
+    try:
+        choice = input(f"\nSelect port number or enter custom port [default: {default_suggestion}]: ").strip()
+        if choice.lower() == 'q':
+            return None
+
+        if not choice:
+            return default_suggestion
+
+        # Check if it's a number (direct port input)
+        if choice.isdigit():
+            return choice
+
+        # Check if it's a list selection
+        idx = int(choice) - 1
+        if 0 <= idx < len(port_list):
+            return port_list[idx][0]
+        else:
+            error("Invalid selection")
+            return None
+    except (ValueError, KeyboardInterrupt):
+        return None
+    except EOFError:
+        return None
+
+
+def generate_compose_template(config):
+    """Generate docker-compose.yml content for the mirror configuration.
+
+    Args:
+        config: MirrorConfig dict with all necessary fields
+
+    Returns:
+        Complete docker-compose.yml content as string
+    """
+    service_upper = config['env_var_prefix']
+    forwarder_name = config['forwarder_service_name']
+    target_port = config['target_port']
+    listen_port = config.get('listen_port', '8080')
+    target_host = config.get('target_host', 'host.docker.internal')
+    domain = config.get('domain', f"{config['original_service_name']}.fiks.im")
+    network = config['network_name']
+
+    # Build env var prefix
+    env_prefix = "FORWARDER_" + service_upper
+
+    # Build env var references using concatenation to avoid f-string nesting issues
+    listen_port_var = "${" + env_prefix + "_LISTEN_PORT:-" + listen_port + "}"
+    target_host_var = "${" + env_prefix + "_TARGET_HOST:-" + target_host + "}"
+    target_port_var = "${" + env_prefix + "_TARGET_PORT:-" + target_port + "}"
+    domain_var = "${" + env_prefix + "_DOMAIN:-" + domain + "}"
+
+    # Build the compose content
+    compose = f"""services:
+  {forwarder_name}:
+    image: ghcr.io/rb3ckers/trafficmirror:latest
+    container_name: {forwarder_name}
+    restart: unless-stopped
+    environment:
+      - LISTEN_PORT={listen_port_var}
+      - TARGET_HOST={target_host_var}
+      - TARGET_PORT={target_port_var}
+    command: "*:${{LISTEN_PORT}} http://${{TARGET_HOST}}:${{TARGET_PORT}}"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "5{target_port}:1234"
+    networks:
+      - {network}
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network={network}"
+      - "traefik.http.routers.{forwarder_name}-rule.rule=Host(`{domain_var}`)"
+      - "traefik.http.routers.{forwarder_name}-rule.entrypoints=web"
+      - "traefik.http.services.{forwarder_name}-rule.loadbalancer.server.port={listen_port_var}"
+      - "traefik.http.routers.{forwarder_name}-secure.rule=Host(`{domain_var}`)"
+      - "traefik.http.routers.{forwarder_name}-secure.entrypoints=websecure"
+      - "traefik.http.routers.{forwarder_name}-secure.tls=true"
+      - "traefik.http.routers.{forwarder_name}-secure.tls.certresolver=le"
+
+networks:
+  {network}:
+    external: true
+"""
+    return compose
+
+
+def write_compose_file(service_name, content):
+    """Write the docker-compose.yml file to mirrors/<service>/ directory.
+
+    Args:
+        service_name: Sanitized service name
+        content: docker-compose.yml content
+
+    Returns:
+        Path to the created file
+    """
+    safe_name = sanitize_name(service_name)
+    mirrors_dir = "mirrors"
+    service_dir = os.path.join(mirrors_dir, safe_name)
+
+    # Create directory structure
+    os.makedirs(service_dir, exist_ok=True)
+
+    compose_path = os.path.join(service_dir, "docker-compose.yml")
+
+    # Check if file exists and prompt for overwrite
+    if os.path.exists(compose_path):
+        response = input(f"File {compose_path} already exists. Overwrite? [y/N]: ").strip().lower()
+        if response != 'y':
+            info("Skipping file generation.")
+            return None
+
+    # Write the file
+    with open(compose_path, "w") as f:
+        f.write(content)
+
+    return compose_path
+
+
+# ============================================================================
+# MIRROR MANAGEMENT FUNCTIONS
+# ============================================================================
+
+def get_mirror_dir(name):
+    """Get the directory path for a mirror.
+
+    Args:
+        name: Mirror name (service name)
+
+    Returns:
+        Path to the mirror directory, or None if it doesn't exist
+    """
+    safe_name = sanitize_name(name)
+    mirror_dir = os.path.join("mirrors", safe_name)
+    if os.path.isdir(mirror_dir):
+        return mirror_dir
+    return None
+
+
+def list_mirrors():
+    """List all available mirrors in the mirrors/ directory.
+
+    Returns:
+        List of mirror names (directories in mirrors/)
+    """
+    mirrors_dir = "mirrors"
+    if not os.path.isdir(mirrors_dir):
+        return []
+
+    mirror_names = []
+    for entry in os.listdir(mirrors_dir):
+        entry_path = os.path.join(mirrors_dir, entry)
+        if os.path.isdir(entry_path) and os.path.exists(os.path.join(entry_path, "docker-compose.yml")):
+            mirror_names.append(entry)
+
+    return sorted(mirror_names)
+
+
+def start_mirror(name):
+    """Start a mirror using docker-compose up -d.
+
+    Args:
+        name: Mirror name
+
+    Returns:
+        Exit code (0 for success, 1 for error)
+    """
+    mirror_dir = get_mirror_dir(name)
+    if not mirror_dir:
+        error(f"Mirror '{name}' not found in mirrors/")
+        return 1
+
+    info(f"Starting mirror '{name}'...")
+    try:
+        result = subprocess.run(
+            ["docker-compose", "up", "-d"],
+            cwd=mirror_dir,
+            capture_output=True,
+            text=True
+        )
+        if result.returncode == 0:
+            success(f"Mirror '{name}' started successfully")
+            return 0
+        else:
+            error(f"Failed to start mirror '{name}'")
+            print(result.stderr)
+            return 1
+    except FileNotFoundError:
+        error("docker-compose command not found. Is docker-compose installed?")
+        return 1
+    except Exception as e:
+        error(f"Error starting mirror: {e}")
+        return 1
+
+
+def stop_mirror(name):
+    """Stop a mirror using docker-compose stop.
+
+    Args:
+        name: Mirror name
+
+    Returns:
+        Exit code (0 for success, 1 for error)
+    """
+    mirror_dir = get_mirror_dir(name)
+    if not mirror_dir:
+        error(f"Mirror '{name}' not found in mirrors/")
+        return 1
+
+    info(f"Stopping mirror '{name}'...")
+    try:
+        result = subprocess.run(
+            ["docker-compose", "stop"],
+            cwd=mirror_dir,
+            capture_output=True,
+            text=True
+        )
+        if result.returncode == 0:
+            success(f"Mirror '{name}' stopped successfully")
+            return 0
+        else:
+            error(f"Failed to stop mirror '{name}'")
+            print(result.stderr)
+            return 1
+    except FileNotFoundError:
+        error("docker-compose command not found. Is docker-compose installed?")
+        return 1
+    except Exception as e:
+        error(f"Error stopping mirror: {e}")
+        return 1
+
+
+def delete_mirror(name):
+    """Delete a mirror: stop with docker-compose down -v, then remove directory.
+
+    Args:
+        name: Mirror name
+
+    Returns:
+        Exit code (0 for success, 1 for error)
+    """
+    mirror_dir = get_mirror_dir(name)
+    if not mirror_dir:
+        error(f"Mirror '{name}' not found in mirrors/")
+        return 1
+
+    # First, stop and remove containers with volumes
+    info(f"Stopping and removing mirror '{name}'...")
+    try:
+        result = subprocess.run(
+            ["docker-compose", "down", "-v"],
+            cwd=mirror_dir,
+            capture_output=True,
+            text=True
+        )
+        if result.returncode != 0:
+            error(f"Warning: docker-compose down reported errors")
+            print(result.stderr)
+    except FileNotFoundError:
+        error("docker-compose command not found. Is docker-compose installed?")
+        return 1
+    except Exception as e:
+        error(f"Error stopping mirror: {e}")
+        return 1
+
+    # Then remove the directory
+    try:
+        import shutil
+        shutil.rmtree(mirror_dir)
+        success(f"Mirror '{name}' deleted successfully")
+        return 0
+    except Exception as e:
+        error(f"Error removing mirror directory: {e}")
+        return 1
+
+
+def main_list_mirrors():
+    """Main function for list mirrors action.
+
+    Returns:
+        Exit code (0 for success, 1 for error)
+    """
+    mirrors = list_mirrors()
+    if not mirrors:
+        info("No mirrors found. Create one with: fiks-mirror add <service>")
+        return 0
+
+    print(f"{GREEN}Available mirrors:{RESET}")
+    for name in mirrors:
+        mirror_dir = os.path.join("mirrors", name)
+        compose_path = os.path.join(mirror_dir, "docker-compose.yml")
+
+        # Check if mirror is running by looking for containers
+        is_running = False
+        try:
+            result = subprocess.run(
+                ["docker-compose", "ps", "-q"],
+                cwd=mirror_dir,
+                capture_output=True,
+                text=True
+            )
+            is_running = bool(result.stdout.strip())
+        except:
+            pass
+
+        status = f"{GREEN}Running{RESET}" if is_running else f"{YELLOW}Stopped{RESET}"
+        print(f"  {name:<30} [{status}]")
+
+    return 0
+
+
+def print_usage():
+    """Print usage/help information."""
+    print("""fiks-mirror - Interactive Traffic Mirror Generator
+
+USAGE:
+    fiks-mirror add [service] [network]  Add a new mirror (interactive or direct)
+    fiks-mirror del <name>               Delete a mirror
+    fiks-mirror list                     List available mirrors
+    fiks-mirror start <name>             Start a mirror
+    fiks-mirror stop <name>              Stop a mirror
+    fiks-mirror --list                   List available Traefik services
+    fiks-mirror --help                   Show this help message
+
+BACKWARD COMPATIBILITY:
+    fiks-mirror                         Same as 'fiks-mirror add'
+    fiks-mirror <service>               Same as 'fiks-mirror add <service>'
+    fiks-mirror <service> <network>     Same as 'fiks-mirror add <service> <network>'
+
+DESCRIPTION:
+    Generate docker-compose files for traffic mirroring using trafficmirror.
+    Discover services from Traefik and create mirror configurations.
+
+ACTIONS:
+    add      Create a new mirror configuration. Without arguments, runs
+             interactively. With service/network, creates directly.
+    del      Remove a mirror. Stops containers with 'docker-compose down -v'
+             and removes the mirrors/<name> directory.
+    list     Show all created mirrors in mirrors/ with their status.
+    start    Start a mirror using 'docker-compose up -d' in mirrors/<name>.
+    stop     Stop a running mirror using 'docker-compose stop'.
+
+EXAMPLES:
+    fiks-mirror add                         # Interactive add
+    fiks-mirror add whoami traefik-public   # Direct add
+    fiks-mirror list                        # List mirrors
+    fiks-mirror start whoami                # Start mirror
+    fiks-mirror stop whoami                 # Stop mirror
+    fiks-mirror del whoami                  # Delete mirror
+    fiks-mirror --list                      # List Traefik services
+""")
+
+
+def main_interactive():
+    """Main function for interactive mode - full service discovery and selection.
+
+    Returns:
+        Exit code (0 for success, 1 for error)
+    """
+    # Fetch data from Traefik
+    info("Fetching services from Traefik...")
+    routers = fetch_json(f"{TRAEFIK_API_URL}/http/routers")
+    services = fetch_json(f"{TRAEFIK_API_URL}/http/services")
+
+    if not routers:
+        error("No services found in Traefik configuration")
+        return 1
+
+    # Fetch Docker container info
+    docker_containers = get_docker_containers()
+
+    # Correlate services
+    correlated = correlate_services(routers, services, docker_containers)
+
+    if not correlated:
+        error("No services could be correlated. Check Traefik and Docker configuration.")
+        return 1
+
+    # Remove duplicates by service_name
+    seen = set()
+    unique_services = []
+    for svc in correlated:
+        if svc['service_name'] not in seen:
+            seen.add(svc['service_name'])
+            unique_services.append(svc)
+
+    # Select service
+    selected = select_service_interactive(unique_services)
+    if not selected:
+        info("No service selected.")
+        return 1
+
+    # Select network
+    if not selected['networks']:
+        error(f"No networks found for service {selected['service_name']}")
+        return 1
+
+    # Handle multiple networks
+    if len(selected['networks']) == 1:
+        network = selected['networks'][0]
+    else:
+        network = select_network_interactive(selected['networks'])
+        if not network:
+            info("No network selected.")
+            return 1
+
+    # Select port from container's exposed ports
+    exposed_ports = selected.get('exposed_ports', {})
+    traefik_port = selected.get('target_port', '')
+    target_port = select_port_interactive(exposed_ports, traefik_port)
+    if not target_port:
+        info("No port selected.")
+        return 1
+
+    # Build mirror config - use container name as target_host
+    original_name = selected['service_name']
+    safe_name = sanitize_name(original_name)
+    container_name = selected.get('container_name', 'host.docker.internal')
+
+    config = {
+        'original_service_name': original_name,
+        'forwarder_service_name': f"forwarder_{safe_name}",
+        'target_port': target_port,
+        'listen_port': '8080',
+        'target_host': container_name,
+        'domain': f"{original_name}.fiks.im",
+        'network_name': network,
+        'env_var_prefix': sanitize_name(original_name).upper(),
+    }
+
+    # Generate and write compose file
+    content = generate_compose_template(config)
+    compose_path = write_compose_file(original_name, content)
+
+    if compose_path:
+        success(f"Created {compose_path}")
+        print(f"  Service: {original_name}")
+        print(f"  Domain: {config['domain']}")
+        print(f"  Target: {container_name}:{target_port}")
+        print(f"  Listen: 8080")
+        print(f"  Network: {network}")
+        print()
+        info(f"To start the mirror: cd {os.path.dirname(compose_path)} && docker-compose up -d")
+        return 0
+
+    return 1
+
+
+# ============================================================================
+# USER STORY 2: COMMAND-LINE ARGUMENT MODE
+# ============================================================================
+
+def discover_services():
+    """Discover and correlate all services from Traefik and Docker.
+
+    Returns:
+        List of correlated ServiceSelection dicts, or None on error
+    """
+    info("Fetching services from Traefik...")
+    routers = fetch_json(f"{TRAEFIK_API_URL}/http/routers")
+    services = fetch_json(f"{TRAEFIK_API_URL}/http/services")
+
+    if not routers:
+        error("No services found in Traefik configuration")
+        return None
+
+    # Fetch Docker container info
+    docker_containers = get_docker_containers()
+
+    # Correlate services
+    correlated = correlate_services(routers, services, docker_containers)
+
+    if not correlated:
+        error("No services could be correlated. Check Traefik and Docker configuration.")
+        return None
+
+    # Remove duplicates by service_name
+    seen = set()
+    unique_services = []
+    for svc in correlated:
+        if svc['service_name'] not in seen:
+            seen.add(svc['service_name'])
+            unique_services.append(svc)
+
+    return unique_services
+
+
+def main_cli_args(service_name, network_name):
+    """Main function for CLI args mode - direct service and network specification.
+
+    Args:
+        service_name: Name of the service to mirror
+        network_name: Network to attach the mirror to
+
+    Returns:
+        Exit code (0 for success, 1 for error)
+    """
+    # Discover services
+    services = discover_services()
+    if not services:
+        return 1
+
+    # Find the requested service
+    selected = None
+    for svc in services:
+        if svc['service_name'] == service_name:
+            selected = svc
+            break
+
+    if not selected:
+        error(f"Service '{service_name}' not found. Available services:")
+        for svc in services:
+            print(f"  - {svc['service_name']}")
+        return 1
+
+    # Validate the requested network exists for this service
+    if network_name not in selected['networks']:
+        error(f"Network '{network_name}' not found for service '{service_name}'.")
+        error(f"Available networks: {', '.join(selected['networks'])}")
+        return 1
+
+    # Select port from container's exposed ports
+    exposed_ports = selected.get('exposed_ports', {})
+    traefik_port = selected.get('target_port', '')
+    target_port = select_port_interactive(exposed_ports, traefik_port)
+    if not target_port:
+        info("No port selected.")
+        return 1
+
+    # Build mirror config - use container name as target_host
+    original_name = selected['service_name']
+    safe_name = sanitize_name(original_name)
+    container_name = selected.get('container_name', 'host.docker.internal')
+
+    config = {
+        'original_service_name': original_name,
+        'forwarder_service_name': f"forwarder_{safe_name}",
+        'target_port': target_port,
+        'listen_port': '8080',
+        'target_host': container_name,
+        'domain': f"{original_name}.fiks.im",
+        'network_name': network_name,
+        'env_var_prefix': sanitize_name(original_name).upper(),
+    }
+
+    # Generate and write compose file
+    content = generate_compose_template(config)
+    compose_path = write_compose_file(original_name, content)
+
+    if compose_path:
+        success(f"Created {compose_path}")
+        print(f"  Service: {original_name}")
+        print(f"  Domain: {config['domain']}")
+        print(f"  Target: {container_name}:{target_port}")
+        print(f"  Listen: 8080")
+        print(f"  Network: {network_name}")
+        print()
+        info(f"To start the mirror: cd {os.path.dirname(compose_path)} && docker-compose up -d")
+        return 0
+
+    return 1
+
+
+def main_partial_args(service_name):
+    """Main function for partial args mode - service specified, select network interactively.
+
+    Args:
+        service_name: Name of the service to mirror
+
+    Returns:
+        Exit code (0 for success, 1 for error)
+    """
+    # Discover services
+    services = discover_services()
+    if not services:
+        return 1
+
+    # Find the requested service
+    selected = None
+    for svc in services:
+        if svc['service_name'] == service_name:
+            selected = svc
+            break
+
+    if not selected:
+        error(f"Service '{service_name}' not found. Available services:")
+        for svc in services:
+            print(f"  - {svc['service_name']}")
+        return 1
+
+    # Select network interactively
+    if not selected['networks']:
+        error(f"No networks found for service {selected['service_name']}")
+        return 1
+
+    if len(selected['networks']) == 1:
+        network = selected['networks'][0]
+    else:
+        network = select_network_interactive(selected['networks'])
+        if not network:
+            info("No network selected.")
+            return 1
+
+    # Select port from container's exposed ports
+    exposed_ports = selected.get('exposed_ports', {})
+    traefik_port = selected.get('target_port', '')
+    target_port = select_port_interactive(exposed_ports, traefik_port)
+    if not target_port:
+        info("No port selected.")
+        return 1
+
+    # Build mirror config - use container name as target_host
+    original_name = selected['service_name']
+    safe_name = sanitize_name(original_name)
+    container_name = selected.get('container_name', 'host.docker.internal')
+
+    config = {
+        'original_service_name': original_name,
+        'forwarder_service_name': f"forwarder_{safe_name}",
+        'target_port': target_port,
+        'listen_port': '8080',
+        'target_host': container_name,
+        'domain': f"{original_name}.fiks.im",
+        'network_name': network,
+        'env_var_prefix': sanitize_name(original_name).upper(),
+    }
+
+    # Generate and write compose file
+    content = generate_compose_template(config)
+    compose_path = write_compose_file(original_name, content)
+
+    if compose_path:
+        success(f"Created {compose_path}")
+        print(f"  Service: {original_name}")
+        print(f"  Domain: {config['domain']}")
+        print(f"  Target: {container_name}:{target_port}")
+        print(f"  Listen: 8080")
+        print(f"  Network: {network}")
+        print()
+        info(f"To start the mirror: cd {os.path.dirname(compose_path)} && docker-compose up -d")
+        return 0
+
+    return 1
+
+
+# ============================================================================
+# USER STORY 3: LIST/INSPECT MODE
+# ============================================================================
+
+def format_service_table(services):
+    """Format services as a colored table for display.
+
+    Args:
+        services: List of ServiceSelection dicts
+
+    Returns:
+        Formatted table string
+    """
+    if not services:
+        return f"{YELLOW}No services found.{RESET}\n"
+
+    # Calculate column widths
+    max_name = max(len(s['service_name']) for s in services)
+    max_path = max(len(s['compose_path']) for s in services)
+    max_net = max(len(', '.join(s['networks'])) for s in services)
+    max_ports = max(len(', '.join(f"{p}/{proto}" for p, proto in s.get('exposed_ports', {}).items())) for s in services)
+
+    name_width = max(max_name, 15)
+    path_width = max(max_path, 20)
+    net_width = max(max_net, 15)
+    ports_width = max(max_ports, 25)
+
+    # Header
+    header = f"{GREEN}{'SERVICE':<{name_width}}  {'PORTS':<{ports_width}}  {'NETWORK':<{net_width}}  {'COMPOSE PATH':<{path_width}}{RESET}\n"
+    header += f"{GREEN}{'-' * name_width}  {'-' * ports_width}  {'-' * net_width}  {'-' * path_width}{RESET}\n"
+
+    # Rows
+    rows = ""
+    for svc in services:
+        name = svc['service_name']
+        ports = ', '.join(f"{p}/{proto}" for p, proto in svc.get('exposed_ports', {}).items()) if svc.get('exposed_ports') else "None"
+        networks = ', '.join(svc['networks']) if svc['networks'] else "None"
+        path = svc['compose_path']
+        rows += f"{name:<{name_width}}  {ports:<{ports_width}}  {networks:<{net_width}}  {path:<{path_width}}\n"
+
+    return header + rows
+
+
+def main_list_mode():
+    """Main function for list mode - display all available services.
+
+    Returns:
+        Exit code (0 for success, 1 for error)
+    """
+    # Discover services
+    services = discover_services()
+    if not services:
+        return 1
+
+    # Print table
+    print(format_service_table(services))
+    return 0
+
+
+def main():
+    """Main entry point - routes to appropriate action based on arguments."""
+    # No arguments: default to interactive add
+    if len(sys.argv) == 1:
+        sys.exit(main_interactive())
+
+    # First argument: check for special flags or action
+    arg1 = sys.argv[1]
+
+    # Help flag
+    if arg1 in ['--help', '-h', 'help']:
+        print_usage()
+        sys.exit(0)
+
+    # List Traefik services (not mirrors)
+    if arg1 == '--list':
+        sys.exit(main_list_mode())
+
+    # Subcommand: list mirrors
+    if arg1 == 'list':
+        sys.exit(main_list_mirrors())
+
+    # Subcommand: delete mirror
+    if arg1 in ['del', 'delete', 'rm', 'remove']:
+        if len(sys.argv) < 3:
+            error("Usage: fiks-mirror del <name>")
+            sys.exit(1)
+        name = sys.argv[2]
+        sys.exit(delete_mirror(name))
+
+    # Subcommand: start mirror
+    if arg1 == 'start':
+        if len(sys.argv) < 3:
+            error("Usage: fiks-mirror start <name>")
+            sys.exit(1)
+        name = sys.argv[2]
+        sys.exit(start_mirror(name))
+
+    # Subcommand: stop mirror
+    if arg1 == 'stop':
+        if len(sys.argv) < 3:
+            error("Usage: fiks-mirror stop <name>")
+            sys.exit(1)
+        name = sys.argv[2]
+        sys.exit(stop_mirror(name))
+
+    # Subcommand: add mirror (explicit)
+    if arg1 == 'add':
+        # Remove 'add' from args and process like regular args
+        remaining = sys.argv[2:]
+
+        # No args: interactive mode
+        if len(remaining) == 0:
+            sys.exit(main_interactive())
+
+        # One arg: service name only (select network interactively)
+        if len(remaining) == 1:
+            sys.exit(main_partial_args(remaining[0]))
+
+        # Two+ args: service name and network
+        if len(remaining) >= 2:
+            sys.exit(main_cli_args(remaining[0], remaining[1]))
+
+    # BACKWARD COMPATIBILITY: no explicit subcommand
+    # fiks-mirror <service> -> add with service name
+    # fiks-mirror <service> <network> -> add with both
+
+    # Check for CLI args mode (service + network)
+    if len(sys.argv) >= 3:
+        service_name = sys.argv[1]
+        network_name = sys.argv[2]
+        sys.exit(main_cli_args(service_name, network_name))
+
+    # Check for partial args mode (service only)
+    if len(sys.argv) == 2:
+        service_name = sys.argv[1]
+        sys.exit(main_partial_args(service_name))
+
+    # Should not reach here, but just in case
+    sys.exit(main_interactive())
+
+
+if __name__ == "__main__":
+    main()
+

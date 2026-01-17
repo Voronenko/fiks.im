@@ -5,6 +5,7 @@ import json
 import subprocess
 import sys
 import re
+import os
 
 # Configuration
 TRAEFIK_API_URL = "http://localhost:880/api"
@@ -25,7 +26,7 @@ def fetch_json(url):
 
 
 def get_docker_containers():
-    """Build a mapping of IP addresses to Container Name/ID."""
+    """Build a mapping of IP addresses to Container Name/ID and compose info."""
     try:
         # Get all running container IDs
         cmd = ["docker", "ps", "-q"]
@@ -44,12 +45,30 @@ def get_docker_containers():
             name = container.get("Name", "").lstrip("/")
             cid = container.get("Id", "")[:12]
 
+            # Extract docker-compose labels
+            labels = container.get("Config", {}).get("Labels", {})
+            compose_project = labels.get("com.docker.compose.project.working_dir", "")
+            compose_service = labels.get("com.docker.compose.service", "")
+
+            # Replace $HOME with ~ in the compose path
+            if compose_project:
+                home = os.path.expanduser("~")
+                if compose_project.startswith(home):
+                    compose_project = "~" + compose_project[len(home):]
+
+            container_info = {
+                "name": name,
+                "id": cid,
+                "compose_path": compose_project if compose_project else None,
+                "compose_service": compose_service if compose_service else None,
+            }
+
             # Check network settings
             networks = container.get("NetworkSettings", {}).get("Networks", {})
             for net_name, net_conf in networks.items():
                 ip = net_conf.get("IPAddress")
                 if ip:
-                    ip_map[ip] = {"name": name, "id": cid}
+                    ip_map[ip] = container_info
 
             # Additional logic for host mode if needed
             if container.get("HostConfig", {}).get("NetworkMode") == "host":
@@ -82,7 +101,7 @@ def main():
 
     # 3. Process and Print
     # Header format
-    header = f"{'HOST':<45} {'ENDPOINT':<40} {'CONTAINER NAME':<30} {'CONTAINER ID':<15} {'CPORT':<25}"
+    header = f"{'HOST':<45} {'ENDPOINT':<40} {'CONTAINER NAME':<30} {'CONTAINER ID':<15} {'CPORT':<25} {'COMPOSE PATH':<40} {'COMPOSE SERVICE':<20}"
     print(header)
     print("-" * len(header))
 
@@ -117,6 +136,8 @@ def main():
         target_preview = "-"
         container_info = "N/A"
         container_id = "-"
+        compose_path = "-"
+        compose_service = "-"
 
         if service:
             lb = service.get("loadBalancer", {})
@@ -143,6 +164,8 @@ def main():
                             info = docker_map[ip]
                             container_info = info["name"]
                             container_id = info["id"]
+                            compose_path = info.get("compose_path") or "-"
+                            compose_service = info.get("compose_service") or "-"
                         else:
                             container_info = "Unknown/External"
                             container_id = "-"
@@ -152,7 +175,7 @@ def main():
                         pass
 
         print(
-            f"{display_host:<45} {name:<40} {container_info:<30} {container_id:<15} {target_preview:<25}"
+            f"{display_host:<45} {name:<40} {container_info:<30} {container_id:<15} {target_preview:<25} {compose_path:<40} {compose_service:<20}"
         )
 
 

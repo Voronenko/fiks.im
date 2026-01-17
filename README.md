@@ -169,3 +169,121 @@ The script prints a table compatible with wide terminal windows:
 *   **CPORT**: The internal service port.
 
 External services mapped via `fiksim` will show as "External/Host".
+
+## Traffic Mirror Generator (fiks-mirror)
+
+`fiks-mirror` is a CLI utility to generate and manage docker-compose files for traffic mirroring. It creates mirror containers that forward copies of traffic to your services for debugging and inspection.
+
+### Usage
+
+Ensure the script is executable:
+```bash
+chmod +x fiks-mirror
+```
+
+#### Commands
+
+*   **Add mirror** (interactive or direct):
+    ```bash
+    ./fiks-mirror add                    # Interactive selection
+    ./fiks-mirror add <service> <network>  # Direct creation
+    ./fiks-mirror                        # Same as 'add' (backward compat)
+    ./fiks-mirror <service> <network>    # Same as 'add' (backward compat)
+    ```
+    *Example:*
+    ```bash
+    ./fiks-mirror add whoami traefik-public
+    ```
+
+*   **List mirrors** (show created mirrors with status):
+    ```bash
+    ./fiks-mirror list
+    ```
+
+*   **Start mirror**:
+    ```bash
+    ./fiks-mirror start <name>
+    ```
+    *Example:*
+    ```bash
+    ./fiks-mirror start whoami
+    ```
+
+*   **Stop mirror**:
+    ```bash
+    ./fiks-mirror stop <name>
+    ```
+
+*   **Delete mirror** (stop, remove volumes, delete directory):
+    ```bash
+    ./fiks-mirror del <name>
+    ```
+
+*   **List available services** (show Traefik services):
+    ```bash
+    ./fiks-mirror --list
+    ```
+
+*   **Help**:
+    ```bash
+    ./fiks-mirror --help
+    ```
+
+### How It Works
+
+1. `fiks-mirror add` queries the Traefik API to discover all registered services
+2. It correlates services with Docker containers to find compose paths, networks, and ports
+3. You select a service (via fzf or CLI argument) and its network
+4. It generates a `mirrors/<service>/docker-compose.yml` file with a trafficmirror container
+5. Use `./fiks-mirror start <name>` to start the mirror
+6. The mirror container forwards traffic copies to the original service using the [trafficmirror](https://github.com/rb3ckers/trafficmirror) tool
+
+### Mirror Lifecycle
+
+```bash
+# Create a new mirror
+./fiks-mirror add whoami traefik-public
+
+# Start the mirror
+./fiks-mirror start whoami
+
+# Check mirror status
+./fiks-mirror list
+
+# Stop the mirror (keeps configuration)
+./fiks-mirror stop whoami
+
+# Delete the mirror (removes everything)
+./fiks-mirror del whoami
+```
+
+### Environment Variables
+
+The generated docker-compose file supports environment variable overrides:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `<SERVICE>_LISTEN_PORT` | 8080 | Port mirror listens on |
+| `<SERVICE>_TARGET_HOST` | (container name) | Host to forward traffic to |
+| `<SERVICE>_TARGET_PORT` | (detected) | Port of original service |
+| `<SERVICE>_DOMAIN` | `<service>.fiks.im` | Domain for mirror |
+
+**Example Override**:
+```bash
+export WHOAMI_LISTEN_PORT=9090
+export WHOAMI_DOMAIN=mirror.example.com
+docker-compose up
+```
+
+### Management Interface
+
+The trafficmirror image exposes a management interface for dynamic reconfiguration:
+
+**Port**: `5<TARGET_PORT>` → mapped to container port 1234
+
+For a service on port 3000, access management at:
+```
+http://localhost:53000
+```
+
+This allows you to change target configuration without restarting the container.
