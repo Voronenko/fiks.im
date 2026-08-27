@@ -11,6 +11,14 @@ down:
 	docker-compose down
 
 
+release:
+	./scripts/release-certs.sh
+
+release-verify:
+	./scripts/release-certs.sh --dry-run --verbose
+
+release-verift: release-verify
+
 swarm-create-traefik-network-once:
 	docker network create --driver=overlay --attachable  traefik-public
 
